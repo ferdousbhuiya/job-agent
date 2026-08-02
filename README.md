@@ -82,11 +82,14 @@ Once running, interact with your bot on Telegram:
 
 This is a long-running Telegram bot, NOT a Streamlit web app. Streamlit Cloud
 cannot keep it alive. The recommended free host is **Render** — free worker
-tiers are persistent (they do not expire like Railway's monthly discard).
+tiers are persistent (they do not expire like Railway's monthly discard). Note:
+Render's **free tier puts idle workers to sleep** — send `/scan` (or any message)
+to wake it, and it resumes polling.
 
-PDF conversion is handled inside the image: the `Dockerfile` installs
-LibreOffice (`libreoffice-core` + `libreoffice-writer`), so `.docx` becomes
-`.pdf` on the host automatically.
+**Attachments:** the `Dockerfile` installs Python only (lightweight, for fast
+deploys). If LibreOffice is absent, the bot sends the tailored documents as
+`.docx` attachments. To send PDFs instead, install `soffice` on the host or set
+`LIBREOFFICE_PATH` to its executable — the bot auto-detects it (see `sender.py`).
 
 ### Deploy from GitHub to Render (free)
 1. Make sure this repo is pushed to GitHub (including `master_resume.docx`, which

@@ -55,18 +55,38 @@ def docx_to_pdf(docx_path, out_dir):
 
 
 def build_application_files(resume_text, cover_text, job_id, work_dir="work"):
-    """Write resume.docx/cover.docx + convert both to PDF. Returns (resume_pdf, cover_pdf, resume_docx, cover_docx)."""
+    """Write resume.docx/cover.docx; convert to PDF only if LibreOffice is present.
+
+    Returns (attach_a, attach_b, resume_docx, cover_docx) where each attach is a
+    path — either a .pdf (soffice available) or the .docx (fallback). Never raises
+    just because LibreOffice is missing.
+    """
     os.makedirs(work_dir, exist_ok=True)
     resume_docx = os.path.join(work_dir, f"resume_{job_id}.docx")
     cover_docx = os.path.join(work_dir, f"cover_{job_id}.docx")
     text_to_docx(resume_text, resume_docx)
     text_to_docx(cover_text, cover_docx)
-    resume_pdf = docx_to_pdf(resume_docx, work_dir)
-    cover_pdf = docx_to_pdf(cover_docx, work_dir)
-    return resume_pdf, cover_pdf, resume_docx, cover_docx
+
+    if find_soffice():
+        try:
+            resume_attach = docx_to_pdf(resume_docx, work_dir)
+            cover_attach = docx_to_pdf(cover_docx, work_dir)
+        except Exception:
+            # PDF failed despite soffice present — fall back to DOCX rather than fail.
+            resume_attach, cover_attach = resume_docx, cover_docx
+    else:
+        # No LibreOffice -> attach the .docx files directly.
+        resume_attach, cover_attach = resume_docx, cover_docx
+
+    return resume_attach, cover_attach, resume_docx, cover_docx
 
 
-def send_application(to_email, subject, body, resume_pdf, cover_pdf):
+def _mime(path):
+    return ("application", "pdf") if path.lower().endswith(".pdf") else (
+        "application", "vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+
+def send_application(to_email, subject, body, resume_attach, cover_attach):
     """Send application email via Gmail SMTP with resume + cover attached."""
     gmail_user = get_key("GMAIL_ADDRESS")
     password = get_key("GMAIL_APP_PASSWORD")
@@ -80,11 +100,13 @@ def send_application(to_email, subject, body, resume_pdf, cover_pdf):
     msg["To"] = to_email
     msg.set_content(body)
 
-    for path in (resume_pdf, cover_pdf):
+    for path in (resume_attach, cover_attach):
+        if not path or not os.path.exists(path):
+            continue
+        maintype, subtype = _mime(path)
         with open(path, "rb") as f:
             msg.add_attachment(
-                f.read(),
-                maintype="application", subtype="pdf",
+                f.read(), maintype=maintype, subtype=subtype,
                 filename=os.path.basename(path),
             )
 
