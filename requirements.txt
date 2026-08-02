@@ -1,0 +1,5 @@
+python-dotenv
+openai
+beautifulsoup4
+python-docx
+python-telegram-bot

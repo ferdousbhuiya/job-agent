@@ -1,0 +1,9 @@
+.env
+__pycache__/
+emailvenv/
+*.docx
+*.pdf
+state.json
+work/
+*.log
+runner.lock
