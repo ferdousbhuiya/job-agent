@@ -2,6 +2,7 @@
 __pycache__/
 emailvenv/
 *.docx
+!master_resume.docx
 *.pdf
 state.json
 work/

@@ -78,28 +78,31 @@ Once running, interact with your bot on Telegram:
 - `/status`: See how many jobs are awaiting your decision.
 - `/help`: Show available commands.
 
-## Deployment (keep it running 24/7)
+## Deployment (keep it running 24/7 on Render)
 
 This is a long-running Telegram bot, NOT a Streamlit web app. Streamlit Cloud
-cannot keep it alive. Use an always-on host such as **Railway**, **Render**,
-or **Fly.io**.
+cannot keep it alive. The recommended free host is **Render** — free worker
+tiers are persistent (they do not expire like Railway's monthly discard).
 
-**Important — PDF conversion:** `sender.py` uses LibreOffice (`soffice`) to turn
-`.docx` into `.pdf`. Make sure your host has it installed, or set the application
-to skip PDFs. On a Linux host:
-`apt-get install -y libreoffice-core libreoffice-writer` (or use `docx2pdf`).
+PDF conversion is handled inside the image: the `Dockerfile` installs
+LibreOffice (`libreoffice-core` + `libreoffice-writer`), so `.docx` becomes
+`.pdf` on the host automatically.
 
-### Railway
-1. Push this repo to GitHub and import it in the Railway dashboard.
-2. Set the following environment variables (Variable -> Add):
-   `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`, `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`,
-   `TELEGRAM_CHAT_ID`, `YOUR_NAME`, `POLL_INTERVAL_MIN` (default 15).
-3. `railway.json` already sets the start command. Railway restarts on failure.
-
-### Render
-1. Create a **Background Worker** (not Web Service) pointing at this repo.
-2. Render auto-uses `render.yaml`. Set the same env vars as above as secret values.
-3. The worker runs `python runner.py` with LibreOffice if you install it in the image.
+### Deploy from GitHub to Render (free)
+1. Make sure this repo is pushed to GitHub (including `master_resume.docx`, which
+   is committed despite the `*.docx` ignore rule).
+2. In the Render dashboard: **New → Background Worker**.
+3. Connect the GitHub repo. Render auto-reads `render.yaml` + `Dockerfile`.
+4. Set these **Environment Variables** (free worker stores them as secrets):
+   - `GMAIL_ADDRESS`
+   - `GMAIL_APP_PASSWORD`
+   - `GROQ_API_KEY`
+   - `TELEGRAM_BOT_TOKEN`
+   - `TELEGRAM_CHAT_ID`
+   - `YOUR_NAME`
+   - `POLL_INTERVAL_MIN` (`15`) — created automatically by `render.yaml`
+5. Deploy. Render builds the Docker image (installs Python + LibreOffice),
+   starts the worker, and keeps it running. It restarts on failure.
 
 ### Run on your own machine (no cloud)
 ```sh
