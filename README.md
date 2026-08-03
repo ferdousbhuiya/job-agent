@@ -51,9 +51,6 @@ If the AI cannot find a recipient email in the job description, the bot will ask
     - `TELEGRAM_BOT_TOKEN`: Get this from `@BotFather` on Telegram.
     - `TELEGRAM_CHAT_ID`: Your numeric user ID. You can get this from a bot like `@userinfobot`.
     - `YOUR_NAME`: Your full name, for email signatures.
-    - `RESEND_API_KEY`: API key from [Resend](https://resend.com/api-keys) — used
-      to send application emails (Gmail SMTP is blocked on Render free workers).
-    - `RESEND_FROM` (Optional): Verified sender on Resend; defaults to `GMAIL_ADDRESS`.
     - `POLL_INTERVAL_MIN`: How often to check Gmail (e.g., `15` for every 15 minutes).
     - `LIBREOFFICE_PATH` (Optional): Full path to `soffice.exe` if not in your system PATH.
 
@@ -107,9 +104,6 @@ auto-detects it (see `sender.py`).
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_ID`
    - `YOUR_NAME`
-   - `RESEND_API_KEY` — from https://resend.com/api-keys. Used to send application
-     emails because Gmail SMTP (465/587) is blocked on Render free workers.
-   - `RESEND_FROM` — verified sender on Resend (defaults to `GMAIL_ADDRESS`).
    - `POLL_INTERVAL_MIN` (`15`) — created automatically by `render.yaml`
 5. Deploy. Render builds the Docker image (installs Python; LibreOffice optional,
    see the Attachments note above), starts the worker, and keeps it running.
