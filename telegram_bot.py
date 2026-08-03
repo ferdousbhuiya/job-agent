@@ -214,8 +214,10 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         subject = f"Application for {app['job_title'] or 'the role'} — {APP_NAME}"
         body = (f"Dear Hiring Team,\n\n{app['cover_letter']}\n\n"
                 f"Best regards,\n{APP_NAME}\n{EMAIL}")
-        send_application(recipient, subject, body,
-                         entry["resume_pdf"], entry["cover_pdf"])
+        # Send in a worker thread so a slow/stalled SMTP connect never blocks
+        # the Telegram event loop (getUpdates / callbacks would freeze).
+        await asyncio.to_thread(send_application, recipient, subject, body,
+                                entry["resume_pdf"], entry["cover_pdf"])
         PENDING.pop(key, None)
         await mark_presented_async(entry["job"]["id"], entry["job"]["subject"],
                                    entry["job"]["from"], sent=True)

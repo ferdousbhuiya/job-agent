@@ -9,6 +9,13 @@ from email.message import EmailMessage
 import smtplib
 from config import get_key
 
+# (host, port, factory). Try implicit-TLS 465 first, then 587 with STARTTLS —
+# Render free workers block port 465 egress, so the fallback keeps sending working.
+SMTP_HOSTS = [
+    ("smtp.gmail.com", 465, smtplib.SMTP_SSL),
+    ("smtp.gmail.com", 587, smtplib.SMTP),
+]
+
 
 def text_to_docx(text, path):
     doc = Document()
@@ -110,7 +117,25 @@ def send_application(to_email, subject, body, resume_attach, cover_attach):
                 filename=os.path.basename(path),
             )
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(gmail_user, password)
-        smtp.send_message(msg)
-    return True
+    # Connect with an explicit timeout so a blocked host (e.g. Render worker with
+    # port 465 egress closed) fails fast instead of hanging the sending thread.
+    # Try 465 (implicit TLS) then 587 (STARTTLS) — Render free workers block 465
+    # egress, so the fallback lets sending still work there.
+    deadline = float(get_key("SMTP_TIMEOUT_SEC") or 20)
+    last_err = None
+    for host, port, factory in SMTP_HOSTS:
+        try:
+            smtp = factory(host, port, timeout=deadline)
+            try:
+                if port == 587:
+                    smtp.ehlo()
+                    smtp.starttls()
+                    smtp.ehlo()
+                smtp.login(gmail_user, password)
+                smtp.send_message(msg)
+                return True
+            finally:
+                smtp.quit()
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"SMTP send failed via all routes: {last_err}")
