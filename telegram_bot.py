@@ -170,7 +170,13 @@ async def process_new_jobs(chat_id, context):
 
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    # A stale/old query (button tapped long after its message was sent, e.g. from a
+    # re-presented copy) can make answer() raise BadRequest. Never let that crash
+    # the handler — log and continue on to the guarded PENDING lookup.
+    try:
+        await query.answer()
+    except Exception:
+        logger.warning("callback query.answer failed (stale query?)", exc_info=True)
     if not only_auth(update):
         await query.message.reply_text("Unauthorized.")
         return
