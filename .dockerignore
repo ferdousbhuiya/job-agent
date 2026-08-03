@@ -1,0 +1,13 @@
+.git/
+.gitignore
+.env
+.emailvenv/
+__pycache__/
+*.pyc
+state.json
+work/
+*.log
+runner.lock
+tailored_cover_letter.docx
+tailored_resume.docx
+*.pdf

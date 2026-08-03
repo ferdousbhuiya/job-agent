@@ -10,7 +10,7 @@ Automated Gmail poller and application customizer. This bot scans a Gmail accoun
 - **Recipient Extraction**: Attempts to find the application recipient's email address from the job description text.
 - **PDF Conversion**: Converts final .docx documents to .PDF using LibreOffice before sending.
 - **SMTP Sending**: Mails the application with PDF attachments using a Gmail account.
-- **State Management**: Remembers processed emails in `state.json` to prevent duplicates.
+- **State Management**: Deduplicates via a Gmail label (`Bot/Processed`) — survives restarts with no local storage.
 
 ## How it Works
 
@@ -88,8 +88,9 @@ to wake it, and it resumes polling.
 
 **Attachments:** the `Dockerfile` installs Python only (lightweight, for fast
 deploys). If LibreOffice is absent, the bot sends the tailored documents as
-`.docx` attachments. To send PDFs instead, install `soffice` on the host or set
-`LIBREOFFICE_PATH` to its executable — the bot auto-detects it (see `sender.py`).
+`.docx` attachments. To send PDFs instead, uncomment the LibreOffice install
+line in the `Dockerfile`, or set `LIBREOFFICE_PATH` to its executable — the bot
+auto-detects it (see `sender.py`).
 
 ### Deploy from GitHub to Render (free)
 1. Make sure this repo is pushed to GitHub (including `master_resume.docx`, which
@@ -104,11 +105,14 @@ deploys). If LibreOffice is absent, the bot sends the tailored documents as
    - `TELEGRAM_CHAT_ID`
    - `YOUR_NAME`
    - `POLL_INTERVAL_MIN` (`15`) — created automatically by `render.yaml`
-5. Deploy. Render builds the Docker image (installs Python + LibreOffice),
-   starts the worker, and keeps it running. It restarts on failure.
+5. Deploy. Render builds the Docker image (installs Python; LibreOffice optional,
+   see the Attachments note above), starts the worker, and keeps it running.
+   It restarts on failure.
 
 ### Run on your own machine (no cloud)
 ```sh
 python runner.py --interval 15
 ```
-Requires LibreOffice for PDF attachments. Keep the machine on.
+Requires LibreOffice for PDF attachments (`.docx` sent otherwise). Keep the
+machine on. Dedupe is server-side via Gmail labels — no local `state.json`, so
+restarts re-present any job still awaiting your decision.

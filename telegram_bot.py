@@ -8,7 +8,7 @@ from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                           MessageHandler, ContextTypes, filters)
 
 from config import get_key
-from gmail_poller import fetch_new_emails, mark_presented
+from gmail_poller import fetch_new_emails, mark_presented, add_flag, list_flagged
 from ai_tailor import extract_text_from_docx, build_application_from_jd
 from sender import build_application_files, send_application
 
@@ -47,6 +47,23 @@ def format_job_summary(job, app):
         f"From:    {job['from']}\n"
         f"\n**Job Description:**\n{job['body'][:1500]}"
     )
+
+
+# ---- sync -> async bridges (IMAP work must not run on the event loop) ----
+async def poll_new_jobs():
+    return await asyncio.to_thread(fetch_new_emails)
+
+
+async def mark_presented_async(*args, **kwargs):
+    return await asyncio.to_thread(mark_presented, *args, **kwargs)
+
+
+async def add_flag_async(email_id):
+    return await asyncio.to_thread(add_flag, email_id)
+
+
+async def list_flagged_async():
+    return await asyncio.to_thread(list_flagged)
 
 
 # ---- bot handlers ----
@@ -93,7 +110,7 @@ async def process_new_jobs(chat_id, context):
     if not target:
         return  # nobody to notify
 
-    new_jobs, err = fetch_new_emails()
+    new_jobs, err = await poll_new_jobs()
     if err != "Success":
         await send(target, f"⚠️ {err}")
         return
@@ -118,20 +135,23 @@ async def process_new_jobs(chat_id, context):
             continue
 
         try:
-            resume_pdf, cover_pdf, resume_docx, cover_docx = build_application_files(
-                app["resume"], app["cover_letter"], job["id"])
+            resume_pdf, cover_pdf, resume_docx, cover_docx = await asyncio.to_thread(
+                build_application_files, app["resume"], app["cover_letter"], job["id"])
         except Exception as e:
             logger.exception("doc build failed")
             await send(target, f"⚠️ Could not build documents for {job['subject']}: {e}")
             continue
 
+        # Persist "awaiting decision" flag before presenting, so a restart can
+        # re-present this job via list_flagged().
+        await add_flag_async(job["id"])
+
         PENDING[key] = {"job": job, "app": app,
                         "resume_pdf": resume_pdf, "cover_pdf": cover_pdf,
                         "recipient": app["recipient"]}
 
-        # Record as handed to user so the same job isn't re-presented each poll.
-        # BODY.PEEK keeps the email unread, so this is what enforces dedupe now.
-        mark_presented(job["id"], job["subject"], job["from"], sent=False)
+        # Mark processed (tombstone) + keep the flag so it survives a restart.
+        await mark_presented_async(job["id"], job["subject"], job["from"], flag=True)
 
         await send(target, format_job_summary(job, app), parse_mode="Markdown")
         await send(target,
@@ -166,7 +186,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if action == "skip":
         PENDING.pop(key, None)
-        mark_presented(entry["job"]["id"], entry["job"]["subject"], entry["job"]["from"], sent=False)
+        await mark_presented_async(entry["job"]["id"], entry["job"]["subject"],
+                                   entry["job"]["from"], sent=False)
         await query.message.reply_text("Skipped. Application not sent.")
         return
 
@@ -190,7 +211,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         send_application(recipient, subject, body,
                          entry["resume_pdf"], entry["cover_pdf"])
         PENDING.pop(key, None)
-        mark_presented(entry["job"]["id"], entry["job"]["subject"], entry["job"]["from"], sent=True)
+        await mark_presented_async(entry["job"]["id"], entry["job"]["subject"],
+                                   entry["job"]["from"], sent=True)
         await query.message.reply_text(f"✅ Application sent to {recipient}.")
     except Exception as e:
         logger.exception("send failed")
@@ -211,6 +233,8 @@ async def manual_recipient(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     entry = PENDING.get(key)
     if entry:
         entry["recipient"] = email
+        await mark_presented_async(entry["job"]["id"], entry["job"]["subject"],
+                                   entry["job"]["from"], flag=True)
         await update.message.reply_text(f"Recipient set to {email}. Now tap ✅ Send application again.")
     context.user_data.pop("awaiting_recipient_for", None)
 
@@ -249,10 +273,65 @@ async def poll_loop(application, interval_minutes):
         await asyncio.sleep(interval_minutes * 60)
 
 
+async def rehydrate(context, chat_id):
+    """Re-present any job flagged as awaiting a decision after a restart.
+
+    Tailored docs were lost with the ephemeral filesystem, so rebuild them from
+    the stored message body. Already-processed/sent jobs are excluded by the
+    label search.
+    """
+    target = resolved_chat_id(chat_id)
+    if not target:
+        return
+    send = context.bot.send_message
+    try:
+        jobs = await list_flagged_async()
+    except Exception:
+        logger.exception("rehydrate: listing flagged jobs failed")
+        return
+    if not jobs:
+        return
+
+    try:
+        master_text = extract_text_from_docx(MASTER_RESUME)
+    except FileNotFoundError:
+        await send(target, f"❌ {MASTER_RESUME} not found. Add it next to the script.")
+        return
+
+    logger.info("Rehydrating %s pending job(s) from Gmail label", len(jobs))
+    for job in jobs:
+        key = job_key(job)
+        try:
+            app = build_application_from_jd(master_text, job["body"])
+            resume_pdf, cover_pdf, _, _ = await asyncio.to_thread(
+                build_application_files, app["resume"], app["cover_letter"], job["id"])
+        except Exception as e:
+            logger.exception("rehydrate doc build failed")
+            await send(target, f"⚠️ Could not re-present {job['subject']}: {e}")
+            continue
+
+        PENDING[key] = {"job": job, "app": app,
+                        "resume_pdf": resume_pdf, "cover_pdf": cover_pdf,
+                        "recipient": app["recipient"]}
+        await send(target, format_job_summary(job, app), parse_mode="Markdown")
+        await send(target, f"**Tailored Resume**\n{app['resume'][:1800]}", parse_mode="Markdown")
+        await send(target, f"**Tailored Cover Letter**\n{app['cover_letter'][:1800]}",
+                   parse_mode="Markdown")
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Send application", callback_data=f"send:{key}"),
+            InlineKeyboardButton("❌ Skip", callback_data=f"skip:{key}"),
+        ]])
+        await send(target, "Ready to send?", reply_markup=keyboard)
+
+
 async def run_bot(interval_minutes):
     app = build_bot()
     async with app:
         await app.start()
         await app.updater.start_polling()
         logger.info("Bot started. ctrl+C to stop.")
+        try:
+            await rehydrate(app, resolved_chat_id(None))
+        except Exception:
+            logger.exception("rehydrate failed")
         await poll_loop(app, interval_minutes)

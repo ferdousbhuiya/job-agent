@@ -1,51 +1,98 @@
 # gmail_poller.py
-# Polls Gmail for new job-related emails. Keeps a seen-ID set in state.json
-# so nothing is processed twice. Returns only NEW (unprocessed) emails.
-import os
-import json
+# Polls Gmail for new job-related emails. Deduplication is handled server-side
+# with Gmail labels (Bot/Processed), so it survives container restarts where the
+# local filesystem is ephemeral (e.g. Render free worker). Returns only NEW
+# (unprocessed) emails.
+import re
 import imaplib
 import email
-import re
+from contextlib import contextmanager
 from email.header import decode_header
 from bs4 import BeautifulSoup
 from config import get_key
 
-STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
+# Label tree (created on first use):
+#   Bot/Processed  -> handed to user; tombstone, never re-presented
+#   Bot/Flagged    -> presented & awaiting user decision (startup rehydrate)
+#   Bot/Sent       -> application sent
+LABEL_FLAGGED = "Bot/Flagged"
+LABEL_SENT = "Bot/Sent"
+LABEL_PROCESSED = "Bot/Processed"
 
 # Keywords that hint an email is a job posting / alert worth handling.
 JOB_KEYWORDS = ("job", "vacancy", "intern", "hiring", "opportunity", "position",
                 "role", "recruit", "apply", "opening", "career", "talent")
 
+_UID_RE = re.compile(rb"UID (\d+)")
 
-def load_state():
-    """Return dict of processed email-IDs -> {subject, from, processed_at}."""
-    if os.path.exists(STATE_FILE):
+
+@contextmanager
+def connect_gmail():
+    """Yield a logged-in, INBOX-selected IMAP connection; always closes it."""
+    mail = imaplib.IMAP4_SSL("imap.gmail.com")
+    try:
+        mail.login(get_key("GMAIL_ADDRESS"), get_key("GMAIL_APP_PASSWORD"))
+        mail.select("INBOX")
+        yield mail
+    finally:
         try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+            mail.logout()
         except Exception:
-            return {}
-    return {}
+            pass
 
 
-def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+def ensure_labels(mail):
+    """Create the Bot label tree. Idempotent — a 'NO' on repeat is fine."""
+    for label in ("Bot", LABEL_PROCESSED, LABEL_FLAGGED, LABEL_SENT):
+        try:
+            mail.create(f'"{label}"')
+        except Exception:
+            pass
 
 
-def is_processed(state, uid):
-    return uid in state
+def set_labels(mail, email_id, labels):
+    """Add one or more labels to a message by UID. Idempotent."""
+    joined = " ".join(f'"{l}"' for l in labels)
+    mail.uid("STORE", email_id, "+X-GM-LABELS", f"({joined})")
 
 
-def mark_presented(email_id, subject, sender, sent=False):
-    """Record that an email has been handed to the user, so it isn't shown again."""
-    state = load_state()
-    state[email_id] = {
-        "subject": subject,
-        "from": sender,
-        "sent": sent,
-    }
-    save_state(state)
+def clear_labels(mail, email_id, labels):
+    """Remove one or more labels from a message by UID."""
+    joined = " ".join(f'"{l}"' for l in labels)
+    mail.uid("STORE", email_id, "-X-GM-LABELS", f"({joined})")
+
+
+def mark_presented(email_id, subject, sender, sent=False, flag=False):
+    """Record how an email was handled, via Gmail labels.
+
+    email_id is the message UID (string). Labels apply by UID, so this works
+    regardless of the selected mailbox. Idempotent — safe to call repeatedly.
+
+    Label semantics:
+      Bot/Processed  always set — tombstone, stops re-fetch on /scan.
+      Bot/Flagged    set iff flag=True (presented, awaiting decision).
+      Bot/Sent       set iff sent=True.
+    Clearing Flagged marks the job answered/abandoned so startup rehydration
+    never re-presents it.
+    """
+    labels = [LABEL_PROCESSED]
+    if flag:
+        labels.append(LABEL_FLAGGED)
+    if sent:
+        labels.append(LABEL_SENT)
+    with connect_gmail() as mail:
+        ensure_labels(mail)
+        set_labels(mail, email_id, labels)
+        if not flag:
+            # Answered (sent) or skipped: clear the "awaiting decision" marker.
+            clear_labels(mail, email_id, [LABEL_FLAGGED])
+
+
+def add_flag(email_id):
+    """Mark a message as 'presented, awaiting decision' (race-safe pre-label)."""
+    with connect_gmail() as mail:
+        ensure_labels(mail)
+        set_labels(mail, email_id, [LABEL_FLAGGED])
 
 
 def _decode(header_part):
@@ -96,61 +143,83 @@ def _is_job_email(subject, body):
     return any(k in haystack for k in JOB_KEYWORDS)
 
 
-def fetch_new_emails(limit=10, job_filter=True):
-    """Connect to Gmail, fetch UNSEEN emails, return only new + job-ish ones.
+def _to_job(uid, msg):
+    """Build a job dict from a message + its UID."""
+    return {
+        "id": uid,
+        "subject": _decode(msg.get("Subject")) or "(no subject)",
+        "from": _decode(msg.get("From")),
+        "body": _clean_body(msg),
+        "date": msg.get("Date", ""),
+    }
 
-    Returns (new_emails, error). new_emails = list of dicts:
-      {id, subject, from, body, date}
-    Processed IDs (already in state.json) are skipped.
+
+def _fetch_uids(mail, search_parts):
+    """Run a UID SEARCH and return (uids, error)."""
+    status, messages = mail.uid("SEARCH", None, *search_parts)
+    if status != "OK":
+        return [], "Search failed"
+    return messages[0].split(), "Success"
+
+
+def _fetch_job(mail, uid):
+    """Fetch one message by UID, return job dict or None."""
+    status, data = mail.uid("FETCH", uid, "(BODY.PEEK[] UID)")
+    if status != "OK":
+        return None
+    uid_str = uid.decode(errors="ignore")
+    for part in data:
+        if isinstance(part, tuple):
+            hdr = part[0]
+            m = _UID_RE.search(hdr)
+            if m:
+                uid_str = m.group(1).decode()
+            return _to_job(uid_str, email.message_from_bytes(part[1]))
+    return None
+
+
+def fetch_new_emails(limit=10, job_filter=True):
+    """Fetch UNSEEN emails not already labeled Bot/Processed.
+
+    Returns (new_emails, error). id is the message UID, used with UID STORE to
+    apply labels later.
     """
     gmail_user = get_key("GMAIL_ADDRESS")
-    gmail_password = get_key("GMAIL_APP_PASSWORD")
-    if not gmail_user or not gmail_password:
+    if not gmail_user or not get_key("GMAIL_APP_PASSWORD"):
         return [], "Gmail credentials missing"
 
-    state = load_state()
     new_emails = []
-
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(gmail_user, gmail_password)
-        mail.select("inbox")
-
-        status, messages = mail.search(None, "UNSEEN")
-        if status != "OK":
-            mail.logout()
-            return [], "No unread emails"
-
-        email_ids = messages[0].split()
-        latest_ids = email_ids[-limit:][::-1]  # newest first
-
-        for num in latest_ids:
-            uid = num.decode()
-            if is_processed(state, uid):
-                continue
-            status, msg_data = mail.fetch(num, "(BODY.PEEK[])")
-            for response_part in msg_data:
-                if not isinstance(response_part, tuple):
-                    continue
-                msg = email.message_from_bytes(response_part[1])
-                subject = _decode(msg["Subject"])
-                sender = _decode(msg.get("From"))
-                body = _clean_body(msg)
-                date = msg.get("Date", "")
-
-                if not _is_job_email(subject, body):
-                    continue
-
-                new_emails.append({
-                    "id": uid,
-                    "subject": subject or "(no subject)",
-                    "from": sender,
-                    "body": body,
-                    "date": date,
-                })
-
-        mail.logout()
+        with connect_gmail() as mail:
+            ensure_labels(mail)
+            uids, err = _fetch_uids(mail, ["UNSEEN", "NOT", "X-GM-LABELS", f'"{LABEL_PROCESSED}"'])
+            if err != "Success":
+                return [], "No unread emails" if not uids else err
+            for uid in uids[-limit:][::-1]:  # newest first
+                job = _fetch_job(mail, uid)
+                if job and (not job_filter or _is_job_email(job["subject"], job["body"])):
+                    new_emails.append(job)
     except Exception as e:
         return [], f"IMAP Error: {e}"
 
     return new_emails, "Success"
+
+
+def list_flagged():
+    """Return job dicts for messages labeled Bot/Flagged (awaiting decision).
+
+    Used on startup to re-present undecided jobs after a restart. Answering a
+    job (approve/skip) clears Bot/Flagged, so handled jobs are naturally absent.
+    """
+    jobs = []
+    try:
+        with connect_gmail() as mail:
+            ensure_labels(mail)
+            uids, _ = _fetch_uids(mail, ["X-GM-LABELS", f'"{LABEL_FLAGGED}"'])
+            for uid in uids:
+                job = _fetch_job(mail, uid)
+                if job:
+                    jobs.append(job)
+    except Exception:
+        pass
+    return jobs
