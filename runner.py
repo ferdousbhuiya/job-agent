@@ -59,11 +59,17 @@ def _acquire_lock():
 def main():
     _acquire_lock()
     parser = argparse.ArgumentParser(description="Start AI Job Application Agent")
-    parser.add_argument("--interval", type=int, default=0,
-                        help="Poll Gmail every N minutes. 0 = no auto-poll (use /scan).")
+    parser.add_argument("--interval", type=int, default=None,
+                        help="Poll Gmail every N minutes. 0 = no auto-poll (use /scan). "
+                             "Default: POLL_INTERVAL_MIN env or 15.")
     args = parser.parse_args()
 
-    interval = args.interval or int(get_key("POLL_INTERVAL_MIN") or 15)
+    # Explicit --interval wins, including 0 (no auto-poll). `or` would turn 0 into
+    # the env default, so check for None explicitly.
+    if args.interval is not None:
+        interval = args.interval
+    else:
+        interval = int(get_key("POLL_INTERVAL_MIN") or 15)
     logger.info("Starting AI Job Agent, poll interval=%s minutes", interval)
     asyncio.run(run_bot(interval))
     # On exit, the OS releases the file lock; global handle keeps it alive while running.
