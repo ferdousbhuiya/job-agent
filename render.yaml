@@ -19,3 +19,9 @@ services:
         sync: false
       - key: YOUR_NAME
         sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      # Optional sender address (defaults to GMAIL_ADDRESS) — must be a
+      # verified domain/email on Resend.
+      - key: RESEND_FROM
+        sync: false
