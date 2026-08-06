@@ -5,7 +5,7 @@ services:
     dockerfilePath: ./Dockerfile
     envVars:
       - key: POLL_INTERVAL_MIN
-        value: 15
+        value: 0   # no auto-poll: only /scan in Telegram triggers a scan
       # Set these in Render dashboard as secret vars:
       - key: GMAIL_ADDRESS
         sync: false

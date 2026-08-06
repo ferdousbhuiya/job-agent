@@ -10,4 +10,4 @@ COPY . .
 # LibreOffice optional — uncomment to send PDF attachments instead of DOCX:
 # RUN apt-get update && apt-get install -y --no-install-recommends libreoffice && rm -rf /var/lib/apt/lists/*
 
-CMD ["python", "runner.py", "--interval", "15"]
+CMD ["python", "runner.py", "--interval", "0"]
