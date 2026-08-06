@@ -23,6 +23,31 @@ LABEL_PROCESSED = "Bot/Processed"
 JOB_KEYWORDS = ("job", "vacancy", "intern", "hiring", "opportunity", "position",
                 "role", "recruit", "apply", "opening", "career", "talent")
 
+# Strong signals this is NOT a real job posting (promos, deals, alerts, spam).
+# Any hit overrides a weak JOB_KEYWORDS match. Match on word boundaries to avoid
+# a promo subject like "Career day" falsely slipping through.
+_PROMO_KEYWORDS = (
+    "promotion", "promo", "discount", "deal", "sale", "offer", "% off", "voucher",
+    "coupon", "flash sale", "free shipping", "save ", "order now", "don't miss",
+    "unsubscribe", "weekly", "newsletter", "subscription", "reward", "cashback",
+    "price drop", "big savings", "clearance", "of sale", "update your app",
+    "notification", "your order", "shipping now", "package", "track your",
+    "thank you for your order", "member", "loyalty", "points ", "wallet",
+    "instagram", "facebook", "tiktok", "reels", "feed", "post", "follow us",
+)
+# Senders never to treat as a job. Lowercased, case-insensitive match against
+# the sender name+domain.
+# Senders never to treat as a job. Lowercased, case-insensitive match against
+# the sender name+domain. Only clearly non-recruiting brands go here — job
+# platforms legitimately send from noreply@, so that prefix is NOT a blocker.
+_BLOCKED_SENDERS = (
+    "temu", "amazon", "ebay", "alibaba", "ali express", "wiish", "shein",
+    "walmart", "shopify", "best buy", "target", "wish", "notify", "paypal",
+    "newsletter", "alert@", "kaggle", "supabase", "twilio", "redfin",
+    "real estate", "preapproval", "mortgage", "zillow", "redfin",
+    "guidanceresidential", "insurance", "loan", "property",
+)
+
 _UID_RE = re.compile(rb"UID (\d+)")
 
 
@@ -138,9 +163,25 @@ def _clean_body(msg):
     return ""
 
 
-def _is_job_email(subject, body):
+def _is_job_email(subject, body, sender=""):
+    """True if this email looks like a real job posting, not promo/spam.
+
+    Two checks:
+      1. BLOCKED sender (promo domains: Temu, Amazon, etc.) -> always False.
+      2. JOB_KEYWORDS match. A strong PROMO hit (e.g. "sale", "discount",
+         "unsubscribe") vetoes it — a promotional email can casually contain
+         "apply" or "opportunity", so promotions must win.
+    """
+    if sender and any(b in sender.lower() for b in _BLOCKED_SENDERS):
+        return False
+
     haystack = f"{subject} {body}".lower()
-    return any(k in haystack for k in JOB_KEYWORDS)
+    has_job = any(k in haystack for k in JOB_KEYWORDS)
+    if not has_job:
+        return False
+    if any(p in haystack for p in _PROMO_KEYWORDS):
+        return False
+    return True
 
 
 def _to_job(uid, msg):
@@ -197,7 +238,7 @@ def fetch_new_emails(limit=10, job_filter=True):
                 return [], "No unread emails" if not uids else err
             for uid in uids[-limit:][::-1]:  # newest first
                 job = _fetch_job(mail, uid)
-                if job and (not job_filter or _is_job_email(job["subject"], job["body"])):
+                if job and (not job_filter or _is_job_email(job["subject"], job["body"], job["from"])):
                     new_emails.append(job)
     except Exception as e:
         return [], f"IMAP Error: {e}"

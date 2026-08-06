@@ -16,10 +16,11 @@ def extract_text_from_docx(file_path):
     return "\n".join([para.text for para in doc.paragraphs])
 
 def tailor_application(master_resume_text, job_description, job_title, company):
-    """Tailor resume + cover to a JD. Two-pass: draft -> self-critique -> rewrite.
+    """Tailor resume + cover to a JD. Two-pass: draft -> critique -> rewrite, in 3 calls.
 
     Only reorders/repackages what is actually on the master resume; never invents
-    experience. ATS keyword coverage is checked and enforced.
+    experience. ATS keyword coverage is checked and enforced. Uses 3 LLM calls
+    (budget-friendly): one draft prompt that embeds the JD, then critique + rewrite.
     """
     user_context = """
     USER BACKGROUND CONTEXT (use ONLY these real facts; never invent experience):
@@ -130,12 +131,30 @@ COVER_LETTER_END
     return final_resume or resume, final_cover
 
 
-def _call(prompt, temperature):
-    return client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-    ).choices[0].message.content
+_MODEL = "llama-3.3-70b-versatile"  # quality. Fewer-call pipeline keeps free tier under quota
+_META_CALLS = 1  # reserve budget for the meta+tailor calls per job
+
+def _call(prompt, temperature, retries=3):
+    """Chat call with exponential backoff on Groq rate-limit (429/503).
+
+    Auto-scan makes 4 calls/job; free tier throttles hard. Back off instead of
+    crashing so the scan survives a busy window.
+    """
+    import time
+    for attempt in range(retries):
+        try:
+            return client.chat.completions.create(
+                model=_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+            ).choices[0].message.content
+        except Exception as e:
+            status = getattr(e, "status_code", None) or getattr(e, "status", None)
+            if status in (429, 503) and attempt < retries - 1:
+                time.sleep(2 ** attempt * 2)
+                continue
+            raise
+    raise RuntimeError("unreachable")
 
 
 def _split(content):
@@ -180,7 +199,7 @@ def extract_meta_from_jd(job_description):
     """
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0
         )
