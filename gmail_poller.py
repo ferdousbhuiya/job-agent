@@ -6,6 +6,7 @@
 import re
 import imaplib
 import email
+import datetime
 from contextlib import contextmanager
 from email.header import decode_header
 from bs4 import BeautifulSoup
@@ -21,7 +22,15 @@ LABEL_PROCESSED = "Bot/Processed"
 
 # Keywords that hint an email is a job posting / alert worth handling.
 JOB_KEYWORDS = ("job", "vacancy", "intern", "hiring", "opportunity", "position",
-                "role", "recruit", "apply", "opening", "career", "talent")
+                "role", "recruit", "apply", "opening", "career", "talent",
+                "engineer", "manager", "developer", "designer", "analyst",
+                "consultant", "architect", "scientist")
+
+# Subject lines that look job-ish ("opporunity" etc.) but are really platform
+# alerts / notifications / forms, not a concrete role. Matched on the subject.
+_SUBJECT_BLOCK = ("new form submission", "form submission", "notifications",
+                  "notification", "welcome to", "welcome from", "account",
+                  "your profile", "profile might")
 
 # Strong signals this is NOT a real job posting (promos, deals, alerts, spam).
 # Any hit overrides a weak JOB_KEYWORDS match. Match on word boundaries to avoid
@@ -46,6 +55,8 @@ _BLOCKED_SENDERS = (
     "newsletter", "alert@", "kaggle", "supabase", "twilio", "redfin",
     "real estate", "preapproval", "mortgage", "zillow", "redfin",
     "guidanceresidential", "insurance", "loan", "property",
+    "form submission", "striive", "careerjet", "job alert",
+    "your daily jobs",
 )
 
 _UID_RE = re.compile(rb"UID (\d+)")
@@ -166,20 +177,32 @@ def _clean_body(msg):
 def _is_job_email(subject, body, sender=""):
     """True if this email looks like a real job posting, not promo/spam.
 
-    Two checks:
-      1. BLOCKED sender (promo domains: Temu, Amazon, etc.) -> always False.
-      2. JOB_KEYWORDS match. A strong PROMO hit (e.g. "sale", "discount",
-         "unsubscribe") vetoes it — a promotional email can casually contain
-         "apply" or "opportunity", so promotions must win.
+    Checks:
+      1. BLOCKED sender (promo domains/Google forms etc.) -> always False.
+      2. JOB title is in the SUBJECT line: strong recruiter signal, accept
+         regardless of body wording (bodies of legit recruiters routinely
+         contain promo-ish words like "notification"/"state"/"available" that a
+         naive body veto would wrongly suppress).
+      3. Otherwise, if a job keyword appears only in the body, a strong PROMO
+         hit (sale, discount, unsubscribe, etc.) wins and vetoes it.
     """
     if sender and any(b in sender.lower() for b in _BLOCKED_SENDERS):
         return False
 
-    haystack = f"{subject} {body}".lower()
-    has_job = any(k in haystack for k in JOB_KEYWORDS)
+    subj = subject.lower()
+    body_l = body.lower()
+
+    # Platform alert/notification subjects that would otherwise keyword-match.
+    if any(b in subj for b in _SUBJECT_BLOCK):
+        return False
+
+    if any(k in subj for k in JOB_KEYWORDS):
+        return True
+
+    has_job = any(k in body_l for k in JOB_KEYWORDS)
     if not has_job:
         return False
-    if any(p in haystack for p in _PROMO_KEYWORDS):
+    if any(p in body_l for p in _PROMO_KEYWORDS):
         return False
     return True
 
@@ -219,8 +242,13 @@ def _fetch_job(mail, uid):
     return None
 
 
-def fetch_new_emails(limit=10, job_filter=True):
-    """Fetch UNSEEN emails not already labeled Bot/Processed.
+def fetch_new_emails(limit=40, job_filter=True):
+    """Fetch job-relevant emails from a recent time window, not yet Processed.
+
+    Unlike the older `UNSEEN`-only scan, this catches mail the user already read
+    (Gmail marks read on preview/phone). Search is `SINCE N-day window` AND NOT
+    labeled Bot/Processed, newest first. N comes from SCAN_DAYS (default 3);
+    `limit` caps how many messages get fetched in one scan.
 
     Returns (new_emails, error). id is the message UID, used with UID STORE to
     apply labels later.
@@ -229,13 +257,16 @@ def fetch_new_emails(limit=10, job_filter=True):
     if not gmail_user or not get_key("GMAIL_APP_PASSWORD"):
         return [], "Gmail credentials missing"
 
+    days = int(get_key("SCAN_DAYS") or 10)
+    since = (datetime.date.today() - datetime.timedelta(days=days)).strftime("%d-%b-%Y")
+
     new_emails = []
     try:
         with connect_gmail() as mail:
             ensure_labels(mail)
-            uids, err = _fetch_uids(mail, ["UNSEEN", "NOT", "X-GM-LABELS", f'"{LABEL_PROCESSED}"'])
+            uids, err = _fetch_uids(mail, ["SINCE", since, "NOT", "X-GM-LABELS", f'"{LABEL_PROCESSED}"'])
             if err != "Success":
-                return [], "No unread emails" if not uids else err
+                return [], "Search failed"
             for uid in uids[-limit:][::-1]:  # newest first
                 job = _fetch_job(mail, uid)
                 if job and (not job_filter or _is_job_email(job["subject"], job["body"], job["from"])):
