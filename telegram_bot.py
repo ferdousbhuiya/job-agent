@@ -316,7 +316,10 @@ async def rehydrate(context, chat_id):
         return
 
     logger.info("Rehydrating %s pending job(s) from Gmail label", len(jobs))
-    for job in jobs:
+    for i, job in enumerate(jobs):
+        if i:
+            # Space out Groq calls — free tier 429s on rapid sequential bursts.
+            await asyncio.sleep(2)
         key = job_key(job)
         try:
             app = build_application_from_jd(master_text, job["body"])
@@ -330,10 +333,9 @@ async def rehydrate(context, chat_id):
         PENDING[key] = {"job": job, "app": app,
                         "resume_pdf": resume_pdf, "cover_pdf": cover_pdf,
                         "recipient": app["recipient"]}
-        await send(target, format_job_summary(job, app), parse_mode="Markdown")
-        await send(target, f"**Tailored Resume**\n{app['resume'][:1800]}", parse_mode="Markdown")
-        await send(target, f"**Tailored Cover Letter**\n{app['cover_letter'][:1800]}",
-                   parse_mode="Markdown")
+        await _send_md(send, target, format_job_summary(job, app))
+        await _send_md(send, target, f"**Tailored Resume**\n{app['resume']}")
+        await _send_md(send, target, f"**Tailored Cover Letter**\n{app['cover_letter']}")
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Send application", callback_data=f"send:{key}"),
             InlineKeyboardButton("❌ Skip", callback_data=f"skip:{key}"),

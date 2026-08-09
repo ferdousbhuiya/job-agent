@@ -131,7 +131,9 @@ COVER_LETTER_END
     return final_resume or resume, final_cover
 
 
-_MODEL = "llama-3.3-70b-versatile"  # quality. Fewer-call pipeline keeps free tier under quota
+# Model used for tailoring. Override with GROQ_MODEL_NAME for a cheaper/quota-
+# friendlier model (e.g. llama-3.1-8b-instant), or a stronger one.
+_MODEL = get_key("GROQ_MODEL_NAME") or "llama-3.3-70b-versatile"
 _META_CALLS = 1  # reserve budget for the meta+tailor calls per job
 
 def _call(prompt, temperature, retries=3):
