@@ -1,12 +1,14 @@
 # sender.py
 # Builds resume + cover letter as .docx, converts to PDF via LibreOffice,
-# then sends the application email to the extracted recipient via Gmail SMTP.
+# then sends the application email to the extracted recipient via Resend API.
+# (Gmail SMTP is blocked on Render free workers, so mail goes through Resend —
+# a REST API on port 443 that Render allows.)
 import os
 import shutil
 import subprocess
+import base64
 from docx import Document
-from email.message import EmailMessage
-import smtplib
+import httpx
 from config import get_key
 
 
@@ -87,34 +89,45 @@ def _mime(path):
 
 
 def send_application(to_email, subject, body, resume_attach, cover_attach):
-    """Send application email via Gmail SMTP with resume + cover attached.
+    """Send application email via the Resend API (port 443, allowed on Render).
 
-    Runs on the caller's thread; telegram_bot invokes it via asyncio.to_thread so
-    the SMTP IO never blocks the Telegram event loop.
+    Requires RESEND_API_KEY. Attachments are sent as base64 payloads. Sending is
+    synchronous; callers should run it in a worker thread (see telegram_bot).
     """
-    gmail_user = get_key("GMAIL_ADDRESS")
-    password = get_key("GMAIL_APP_PASSWORD")
-    if not gmail_user or not password:
-        raise RuntimeError("Gmail credentials missing")
+    api_key = get_key("RESEND_API_KEY")
+    if not api_key:
+        raise RuntimeError("RESEND_API_KEY missing")
 
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = gmail_user
-    msg["To"] = to_email
-    msg.set_content(body)
+    sender_email = get_key("RESEND_FROM") or get_key("GMAIL_ADDRESS")
 
+    attachments = []
     for path in (resume_attach, cover_attach):
         if not path or not os.path.exists(path):
             continue
-        maintype, subtype = _mime(path)
         with open(path, "rb") as f:
-            msg.add_attachment(
-                f.read(), maintype=maintype, subtype=subtype,
-                filename=os.path.basename(path),
-            )
+            attachments.append({
+                "filename": os.path.basename(path),
+                "content": base64.b64encode(f.read()).decode(),
+                "content_type": _mime(path)[0] + "/" + _mime(path)[1],
+            })
 
-    deadline = float(get_key("SMTP_TIMEOUT_SEC") or 20)
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=deadline) as smtp:
-        smtp.login(gmail_user, password)
-        smtp.send_message(msg)
+    payload = {
+        "from": sender_email,
+        "to": [to_email],
+        "subject": subject,
+        "text": body,
+        "attachments": attachments,
+    }
+
+    try:
+        resp = httpx.post(
+            "https://api.resend.com/emails",
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=30.0,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Resend request failed: {e}")
+    if resp.status_code != 200:
+        raise RuntimeError(f"Resend API error {resp.status_code}: {resp.text[:300]}")
     return True
