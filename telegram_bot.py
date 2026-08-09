@@ -114,6 +114,19 @@ async def process_new_jobs(chat_id, context):
     if err != "Success":
         await send(target, f"⚠️ {err}")
         return
+
+
+async def _send_md(send, target, text, max_len=4000):
+    """Send with Markdown; fall back to plain text if the text has unbalanced
+    markdown fences the Telegram API rejects (common with AI-generated content)."""
+    text = text[:max_len]
+    try:
+        await send(target, text, parse_mode="Markdown")
+    except telegram.error.BadRequest:
+        try:
+            await send(target, text, parse_mode="MarkdownV2")
+        except telegram.error.BadRequest:
+            await send(target, text)
     if not new_jobs:
         if chat_id:
             await send(target, "No new job emails.")
@@ -153,13 +166,9 @@ async def process_new_jobs(chat_id, context):
         # Mark processed (tombstone) + keep the flag so it survives a restart.
         await mark_presented_async(job["id"], job["subject"], job["from"], flag=True)
 
-        await send(target, format_job_summary(job, app), parse_mode="Markdown")
-        await send(target,
-                   f"*Tailored Resume*\n{app['resume'][:1800]}",
-                   parse_mode="Markdown")
-        await send(target,
-                   f"*Tailored Cover Letter*\n{app['cover_letter'][:1800]}",
-                   parse_mode="Markdown")
+        await _send_md(send, target, format_job_summary(job, app))
+        await _send_md(send, target, f"*Tailored Resume*\n{app['resume']}")
+        await _send_md(send, target, f"*Tailored Cover Letter*\n{app['cover_letter']}")
 
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Send application", callback_data=f"send:{key}"),
