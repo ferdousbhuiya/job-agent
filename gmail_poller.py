@@ -65,7 +65,9 @@ _UID_RE = re.compile(rb"UID (\d+)")
 @contextmanager
 def connect_gmail():
     """Yield a logged-in, INBOX-selected IMAP connection; always closes it."""
-    mail = imaplib.IMAP4_SSL("imap.gmail.com")
+    # Timeout on the SSL socket so a stalled Gmail connection (or a Gmail
+    # conn-limit deadlock) fails fast instead of hanging /scan forever.
+    mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=20)
     try:
         mail.login(get_key("GMAIL_ADDRESS"), get_key("GMAIL_APP_PASSWORD"))
         mail.select("INBOX")
