@@ -99,6 +99,9 @@ def send_application(to_email, subject, body, resume_attach, cover_attach):
         raise RuntimeError("RESEND_API_KEY missing")
 
     sender_email = get_key("RESEND_FROM") or get_key("GMAIL_ADDRESS")
+    # Replies go to the applicant's real inbox, not the branded Resend address —
+    # otherwise recruiter replies land nowhere. Override with RESEND_REPLY_TO.
+    reply_to = get_key("RESEND_REPLY_TO") or get_key("GMAIL_ADDRESS")
 
     attachments = []
     for path in (resume_attach, cover_attach):
@@ -114,6 +117,7 @@ def send_application(to_email, subject, body, resume_attach, cover_attach):
     payload = {
         "from": sender_email,
         "to": [to_email],
+        "reply_to": reply_to,
         "subject": subject,
         "text": body,
         "attachments": attachments,
